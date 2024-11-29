@@ -34,6 +34,7 @@ def get_args():
 args = get_args()
 
 data_path = r"C:\Users\Test01\Desktop\CS3-Midterm\Scratch\animals"
+
 def createLabels(data_path):
     LABELS = {}
     for idx, folder in enumerate(tqdm(os.listdir(data_path), desc="Processing folders", delay=0.1)):
@@ -123,7 +124,7 @@ def ExportOnnx(model, onnx_file_path):
         output_names=['output'], 
         opset_version=12
     )
-    print(f"Model exported to {onnx_file_path}")
+    #print(f"Model exported to {onnx_file_path}")
 
 def save_model(model, epoch):
     model_save_dir = "utils"
@@ -144,6 +145,7 @@ def manage_saved_models():
             file_path = os.path.join(model_save_dir, file)
             os.remove(file_path)
             print(f"Deleted old model: {file_path}")
+
 class LossBasedScheduler:
     def __init__(self, optimizer, initial_lr, patience=3, factor=0.5, min_lr=1e-6):
         self.optimizer = optimizer
@@ -160,7 +162,7 @@ class LossBasedScheduler:
             self.num_bad_epochs = 0
         else:
             self.num_bad_epochs += 1
-        
+        print(f"\nBest Loss: {self.best_loss}, Number of bad epochs: {self.num_bad_epochs}\n")
         if self.num_bad_epochs >= self.patience:
             for param_group in self.optimizer.param_groups:
                 old_lr = param_group['lr']
@@ -168,13 +170,13 @@ class LossBasedScheduler:
                 param_group['lr'] = new_lr
                 print(f"Learning rate reduced from {old_lr:.6f} to {new_lr:.6f}")
             self.num_bad_epochs = 0
-            
+
 def train():
     training_data = loadData()
     model = load_resnet_model()
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr) 
-    scheduler = LossBasedScheduler(optimizer, initial_lr=0.01, patience=5, factor=0.5)
+    scheduler = LossBasedScheduler(optimizer, initial_lr=args.lr, patience=5, factor=0.5)
 
     BATCH_SIZE = 32
 
