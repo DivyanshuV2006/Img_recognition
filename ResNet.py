@@ -7,7 +7,7 @@ import torchvision.transforms as transforms
 import onnx
 import onnxruntime as ort
 
-from pathlib import Path
+from sklearn.metrics import precision_score, recall_score, f1_score, classification_report
 import time
 import pickle
 import cv2
@@ -22,11 +22,10 @@ from torchvision.models import ResNet50_Weights, resnet50
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--img", type=str, default=None, help="Path to the input image")
-    parser.add_argument('--device', type=str, default ='cpu',choices = ['cpu','ipu'], help='EP backend selection (Work in progress)')
     parser.add_argument("--num_epochs", type=int, default=100, help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=0.01, help="Starting learning rate of model")
-    parser.add_argument("--build", action='store_true', default=False, help="Build data from scratch")
-    parser.add_argument("--train", action='store_true', default=False, help="Flag to indicate training mode")
+    parser.add_argument("--build", action='store_true', help="Build data from scratch")
+    parser.add_argument("--train", action='store_true', help="Flag to indicate training mode")
 
     args = parser.parse_args()
     return args
@@ -34,6 +33,7 @@ def get_args():
 args = get_args()
 
 data_path = r"C:\Users\Test01\Desktop\CS3-Midterm\Scratch\animals"
+file_path = r"utils\training_data.pkl"
 
 def createLabels(data_path):
     LABELS = {}
@@ -42,6 +42,7 @@ def createLabels(data_path):
     return LABELS
 
 LABELS = createLabels(data_path)
+
 # Format Data
 class buildData():
     def __init__(self, path):
@@ -55,6 +56,15 @@ class buildData():
             self.animalCount[folder] = 0
 
     def trainBuild(self):
+        transform_augment = transforms.Compose([
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(15),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+
         for label in tqdm(LABELS, desc="Building Data"):
             for f in os.listdir(self.data_path + "\\" + label):
                 try:
@@ -62,10 +72,12 @@ class buildData():
                     img = cv2.imread(path, cv2.IMREAD_COLOR)
                     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                     img = cv2.resize(img, (self.IMG_SIZE, self.IMG_SIZE))
-                    img_tensor = transforms.ToTensor()(img)  # Convert to Tensor
-                    img_tensor = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(img_tensor)  # Normalize image
-                    img_tensor = img_tensor.unsqueeze(0)  # Add batch dimension (1, 3, 224, 224)
-                    self.traningData.append([np.array(img_tensor), np.eye(len(LABELS))[LABELS[label]]])  # One hot encode
+
+                    # Convert the image to a PIL Image for augmentation
+                    img_pil = Image.fromarray(img)
+                    img_tensor = transform_augment(img_pil)  # Apply augmentation and transform to tensor
+
+                    self.traningData.append([img_tensor.numpy(), np.eye(len(LABELS))[LABELS[label]]])  # One hot encode
 
                     if label in self.animalCount:
                         self.animalCount[label] += 1
@@ -73,14 +85,14 @@ class buildData():
                     print(str(e))
 
         np.random.shuffle(self.traningData)
-        file_path = r"utils\training_data.pkl"
+        
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "wb") as f:
             pickle.dump(self.traningData, f)
 
 def loadData():
     try:
-        with open(r"utils\training_data.pkl", "rb") as f:
+        with open(file_path, "rb") as f:
             training_data = pickle.load(f)
             return training_data
     except Exception as e:
@@ -89,11 +101,23 @@ def loadData():
 def load_resnet_model():
     weights = ResNet50_Weights.DEFAULT
     resnet = resnet50(weights=weights)
+
+    # Adding batch normalization and other layers
+    resnet.conv1 = torch.nn.Conv2d(3, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+    resnet.bn1 = torch.nn.BatchNorm2d(64)  # Adding batch normalization after conv1
+    resnet.relu = torch.nn.ReLU(inplace=True)
+    resnet.maxpool = torch.nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+    # Adding Batch Normalization after the fully connected layers
     resnet.fc = torch.nn.Sequential(
-        torch.nn.Linear(2048, 128), 
-        torch.nn.LeakyReLU(negative_slope=0.01, inplace=True), 
-        torch.nn.Linear(128, 90)) # 90 output classes
+        torch.nn.Linear(2048, 128),
+        torch.nn.BatchNorm1d(128),  # Batch Normalization after the fully connected layer
+        torch.nn.LeakyReLU(negative_slope=0.01, inplace=True),
+        torch.nn.Dropout(0.5),  # Existing dropout layer
+        torch.nn.Linear(128, len(LABELS))
+    )
     return resnet
+
 
 def preprocess_image(image_path):
     img = Image.open(image_path).convert("RGB")
@@ -109,10 +133,6 @@ def test_onnx_model(ort_session, image_tensor):
     inputs = {ort_session.get_inputs()[0].name: image_tensor.numpy()}
     outputs = ort_session.run(None, inputs)
     return outputs
-
-def load_onnx_model(onnx_model_path):
-    ort_session = ort.InferenceSession(onnx_model_path, providers=providers, provider_options=provider_options)
-    return ort_session
 
 def ExportOnnx(model, onnx_file_path):
     dummy_input = torch.randn(100, 3, 224, 224)  # Example dummy input
@@ -162,7 +182,7 @@ class LossBasedScheduler:
             self.num_bad_epochs = 0
         else:
             self.num_bad_epochs += 1
-        print(f"\nBest Loss: {self.best_loss}, Number of bad epochs: {self.num_bad_epochs}\n")
+        print(f"Best Loss: {self.best_loss}, Number of bad epochs: {self.num_bad_epochs}")
         if self.num_bad_epochs >= self.patience:
             for param_group in self.optimizer.param_groups:
                 old_lr = param_group['lr']
@@ -174,50 +194,88 @@ class LossBasedScheduler:
 def train():
     training_data = loadData()
     model = load_resnet_model()
-    loss_fn = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr) 
-    scheduler = LossBasedScheduler(optimizer, initial_lr=args.lr, patience=5, factor=0.5)
+    #Rebalence the Loss fn
+    class_counts = [len(os.listdir(os.path.join(data_path, label))) for label in LABELS.keys()]
+    total_samples = sum(class_counts)
+    class_weights = [total_samples / (len(LABELS) * count) for count in class_counts]
+    class_weights = torch.tensor(class_weights).float()
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.01)
+    scheduler = LossBasedScheduler(optimizer, initial_lr=args.lr, patience=3, factor=0.5)
 
     BATCH_SIZE = 32
 
     try:
         EPOCHS = args.num_epochs
     except Exception:
-        print("Please pass a valid num of epochs.")
+        print("Please pass a valid number of epochs.")
 
+    # Prepare the dataset
     X = torch.tensor(np.array([i[0] for i in training_data])).view(-1, 3, 224, 224).float() / 255.0
     y = torch.tensor([np.argmax(i[1]) for i in training_data]).long()
-
     dataset = TensorDataset(X, y)
-    train_loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-    
+
+    # Split the dataset into training and validation sets
+    train_size = int(0.7 * len(dataset))  # 80% training
+    val_size = len(dataset) - train_size  # 20% validation
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+    y_true = []
+    y_pred = []
     for epoch in range(EPOCHS):
-        model.train() 
-        for batch_X, batch_y in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}"):
+        # Training loop
+        model.train()
+        running_loss = 0.0
+        for batch_X, batch_y in tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{EPOCHS}"):
             optimizer.zero_grad()
             outputs = model(batch_X)
             loss = loss_fn(outputs, batch_y)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
-        
-        scheduler.step(loss)
+            running_loss += loss.item()
+
+        # Validation loop
+        model.eval()
+        val_loss = 0.0
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for batch_X, batch_y in tqdm(val_loader, desc=f"Validation Epoch {epoch + 1}/{EPOCHS}"):
+                outputs = model(batch_X)
+                loss = loss_fn(outputs, batch_y)
+                val_loss += loss.item()
+                _, predicted = torch.max(outputs, 1)
+                correct += (predicted == batch_y).sum().item()
+                total += batch_y.size(0)
+                y_true.extend(batch_y.cpu().numpy())
+                y_pred.extend(predicted.cpu().numpy())
+
+        val_loss /= len(val_loader)
+        val_accuracy = correct / total
+
+        scheduler.step(val_loss)
 
         if (epoch + 1) % 3 == 0:
             save_model(model, epoch)
 
-        print(f"Epoch {epoch + 1}/{EPOCHS} - Loss: {loss.item():.4f}, Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
-        for param in model.parameters():
-            if param.grad is not None:
-                print(param.grad.abs().mean())
+        precision = precision_score(y_true, y_pred, average='macro')
+        recall = recall_score(y_true, y_pred, average='macro')
+        f1 = f1_score(y_true, y_pred, average='macro')
+
+        print(classification_report(y_true, y_pred, target_names=LABELS))
+        print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1:.4f}\n"
+              f"Train Loss: {running_loss / len(train_loader):.4f}, "
+              f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}, "
+              f"Learning Rate: {optimizer.param_groups[0]['lr']:.6f}\n")
 
     model.eval()
-    ExportOnnx(model)
+    ExportOnnx(model, r"utils\model.onnx")
     onnx.checker.check_model(r"utils\model.onnx")
-
-
-providers = ['CPUExecutionProvider']
-provider_options = [{}]
 
 if args.build:
     Builder = buildData(data_path)
@@ -239,5 +297,5 @@ if args.img is not None:
         predictions = output[0][0]
         predicted_index = predictions.argmax()
         predicted_label = list(LABELS.keys())[list(LABELS.values()).index(predicted_index)]
-
-        print(f"Predicted Animal: {predicted_label}")
+        confidence = predictions[predicted_index]
+        print(f"Predicted Animal: {predicted_label}, (Confidence: {confidence:.2f})")
