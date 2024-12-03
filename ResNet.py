@@ -194,7 +194,7 @@ class LossBasedScheduler:
 def train():
     training_data = loadData()
     model = load_resnet_model()
-    #Rebalence the Loss fn
+    #Rebalence the weights 
     class_counts = [len(os.listdir(os.path.join(data_path, label))) for label in LABELS.keys()]
     total_samples = sum(class_counts)
     class_weights = [total_samples / (len(LABELS) * count) for count in class_counts]
@@ -207,7 +207,7 @@ def train():
     BATCH_SIZE = 32
 
     try:
-        EPOCHS = args.num_epochs
+        EPOCHS = int(args.num_epochs)
     except Exception:
         print("Please pass a valid number of epochs.")
 
