@@ -217,7 +217,7 @@ def train():
     dataset = TensorDataset(X, y)
 
     # Split the dataset into training and validation sets
-    train_size = int(0.7 * len(dataset))  # 80% training
+    train_size = int(0.8 * len(dataset))  # 80% training
     val_size = len(dataset) - train_size  # 20% validation
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
 
