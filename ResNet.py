@@ -2,15 +2,14 @@ import torch
 import torch.onnx
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms as transforms
 import onnx
 import onnxruntime as ort
 
-from sklearn.metrics import precision_score, recall_score, f1_score, classification_report
+from sklearn.metrics import classification_report
 import time
 import pickle
-import cv2
 from tqdm import tqdm
 import os
 import argparse
@@ -18,77 +17,87 @@ import numpy as np
 from PIL import Image
 from torchvision.models import ResNet50_Weights, resnet50
 
-# Initialize the params
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--img", type=str, default=None, help="Path to the input image")
-    parser.add_argument("--num_epochs", type=int, default=100, help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=0.01, help="Starting learning rate of model")
+    parser.add_argument("--num_epochs", type=int, default=50, help="Number of training epochs")
+    parser.add_argument("--lr", type=float, default=0.0001, help="Starting learning rate of model")
+    parser.add_argument("--data_path", type=str, default="training_data", help="Path to the dataset")
     parser.add_argument("--build", action='store_true', help="Build data from scratch")
     parser.add_argument("--train", action='store_true', help="Flag to indicate training mode")
+    parser.add_argument("--batch_size", type=int, default=32, help="Number of samples per iteration")
+    parser.add_argument("--save_mdl", type=str, default="utils", help="Directory to save the trained model ONNX files")
+    parser.add_argument("--model", type=str, default="utils/model.onnx", help="Path to ONNX model for inference")
+    parser.add_argument("--mdl_name", type=str, default="model.onnx", help="Name of saved model")
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Specify device to run on: 'cpu', 'cuda', or 'auto' (default: auto)")
 
     args = parser.parse_args()
     return args
 
 args = get_args()
 
-data_path = r"C:\Users\Test01\Desktop\CS3-Midterm\Scratch\animals"
-file_path = r"utils\training_data.pkl"
+def select_device(device_choice: str):
+    if device_choice == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    elif device_choice == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        else:
+            print("Warning: CUDA requested but not available. Falling back to CPU.")
+            return torch.device("cpu")
+    else:
+        # device_choice == "cpu"
+        return torch.device("cpu")
+
+device = select_device(args.device)
+
+data_path = args.data_path
+file_path = os.path.join("utils", "training_data.pkl")
+IMG_SIZE = 224
 
 def createLabels(data_path):
     LABELS = {}
-    for idx, folder in enumerate(tqdm(os.listdir(data_path), desc="Processing folders", delay=0.1)):
-            LABELS[folder] = idx
+    folders = [f for f in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, f))]
+    for idx, folder in enumerate(tqdm(folders, desc="Processing folders", delay=0.1)):
+        LABELS[folder] = idx
     return LABELS
 
 LABELS = createLabels(data_path)
 
-# Format Data
 class buildData():
     def __init__(self, path):
-        self.IMG_SIZE = 224
         self.data_path = path
         self.traningData = []
         self.animalCount = {}
 
     def process_folders(self):
         for _, folder in enumerate(tqdm(os.listdir(self.data_path), desc="Processing folders", delay=0.1)):
-            self.animalCount[folder] = 0
+            if os.path.isdir(os.path.join(self.data_path, folder)):
+                self.animalCount[folder] = 0
 
     def trainBuild(self):
-        transform_augment = transforms.Compose([
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(15),
-            transforms.ColorJitter(brightness=0.1, contrast=0.1),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-
-
         for label in tqdm(LABELS, desc="Building Data"):
-            for f in os.listdir(self.data_path + "\\" + label):
-                try:
-                    path = os.path.join(self.data_path + "\\" + label, f)
-                    img = cv2.imread(path, cv2.IMREAD_COLOR)
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    img = cv2.resize(img, (self.IMG_SIZE, self.IMG_SIZE))
+            class_path = os.path.join(self.data_path, label)
+            if not os.path.isdir(class_path):
+                print(f"Warning: {class_path} is not a directory, skipping.")
+                continue
 
-                    # Convert the image to a PIL Image for augmentation
-                    img_pil = Image.fromarray(img)
-                    img_tensor = transform_augment(img_pil)  # Apply augmentation and transform to tensor
-
-                    self.traningData.append([img_tensor.numpy(), np.eye(len(LABELS))[LABELS[label]]])  # One hot encode
-
-                    if label in self.animalCount:
-                        self.animalCount[label] += 1
-                except Exception as e:
-                    print(str(e))
+            for f in os.listdir(class_path):
+                file_full_path = os.path.join(class_path, f)
+                if os.path.isfile(file_full_path):
+                    try:
+                        self.traningData.append([file_full_path, LABELS[label]])
+                        if label in self.animalCount:
+                            self.animalCount[label] += 1
+                    except Exception as e:
+                        print(str(e))
 
         np.random.shuffle(self.traningData)
         
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "wb") as f:
             pickle.dump(self.traningData, f)
+        #print(f"Data count: {self.animalCount}\nLabels: {LABELS}")
 
 def loadData():
     try:
@@ -97,57 +106,57 @@ def loadData():
             return training_data
     except Exception as e:
         print("Please build the data with \"model.py --build\"")
+        exit(1)
 
-def load_resnet_model():
+def load_resnet_model(lenClass):
     weights = ResNet50_Weights.DEFAULT
     resnet = resnet50(weights=weights)
 
-    # Adding batch normalization and other layers
-    resnet.conv1 = torch.nn.Conv2d(3, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-    resnet.bn1 = torch.nn.BatchNorm2d(64)  # Adding batch normalization after conv1
-    resnet.relu = torch.nn.ReLU(inplace=True)
-    resnet.maxpool = torch.nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-    # Adding Batch Normalization after the fully connected layers
-    resnet.fc = torch.nn.Sequential(
-        torch.nn.Linear(2048, 128),
-        torch.nn.BatchNorm1d(128),  # Batch Normalization after the fully connected layer
-        torch.nn.LeakyReLU(negative_slope=0.01, inplace=True),
-        torch.nn.Dropout(0.5),  # Existing dropout layer
-        torch.nn.Linear(128, len(LABELS))
+    num_ftrs = resnet.fc.in_features
+    resnet.fc = nn.Sequential(
+        nn.Linear(num_ftrs, 128),
+        nn.BatchNorm1d(128),
+        nn.ReLU(inplace=True),
+        nn.Dropout(0.5),
+        nn.Linear(128, lenClass)
     )
     return resnet
 
-
 def preprocess_image(image_path):
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(IMG_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406],
+                             [0.229, 0.224, 0.225])
+    ])
     img = Image.open(image_path).convert("RGB")
-    img = img.resize((224, 224))
-    img_np = np.array(img) / 255.0
-    img_np = np.transpose(img_np, (2, 0, 1))
-    img_tensor = torch.tensor(img_np).unsqueeze(0).float()
-    img_tensor = img_tensor.repeat(100, 1, 1, 1)
+    img_tensor = transform(img).unsqueeze(0)
     return img_tensor
 
-# Function to test the ONNX model
 def test_onnx_model(ort_session, image_tensor):
     inputs = {ort_session.get_inputs()[0].name: image_tensor.numpy()}
     outputs = ort_session.run(None, inputs)
     return outputs
 
 def ExportOnnx(model, onnx_file_path):
-    dummy_input = torch.randn(100, 3, 224, 224)  # Example dummy input
+    dummy_input = torch.randn(1, 3, IMG_SIZE, IMG_SIZE, device=device)
+    # Move model to CPU before export to ensure portability
+    model_cpu = model.to("cpu")
     torch.onnx.export(
-        model, 
-        dummy_input, 
+        model_cpu, 
+        dummy_input.cpu(), 
         onnx_file_path, 
         input_names=['input'], 
         output_names=['output'], 
         opset_version=12
     )
-    #print(f"Model exported to {onnx_file_path}")
+    # Move back to original device if needed
+    model.to(device)
 
 def save_model(model, epoch):
-    model_save_dir = "utils"
+    model_save_dir = args.save_mdl
+    os.makedirs(model_save_dir, exist_ok=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     onnx_file_path = os.path.join(model_save_dir, f"model_epoch_{epoch + 1}_{timestamp}.onnx")
     ExportOnnx(model, onnx_file_path) 
@@ -155,7 +164,7 @@ def save_model(model, epoch):
     manage_saved_models()
 
 def manage_saved_models():
-    model_save_dir = "utils" 
+    model_save_dir = args.save_mdl
     max_models = 3
     all_files = [f for f in os.listdir(model_save_dir) if f.endswith(".onnx")]
     all_files.sort(key=lambda f: os.path.getmtime(os.path.join(model_save_dir, f)))    
@@ -166,116 +175,178 @@ def manage_saved_models():
             os.remove(file_path)
             print(f"Deleted old model: {file_path}")
 
-class LossBasedScheduler:
-    def __init__(self, optimizer, initial_lr, patience=3, factor=0.5, min_lr=1e-6):
-        self.optimizer = optimizer
-        self.initial_lr = initial_lr
-        self.patience = patience
-        self.factor = factor
-        self.min_lr = min_lr
-        self.best_loss = float('inf')
-        self.num_bad_epochs = 0
+class ApplyTransform(Dataset):
+    def __init__(self, data_list, transform=None):
+        self.data_list = data_list
+        self.transform = transform
     
-    def step(self, current_loss):
-        if current_loss < self.best_loss - 1e-6:
-            self.best_loss = current_loss
-            self.num_bad_epochs = 0
+    def __len__(self):
+        return len(self.data_list)
+    
+    def __getitem__(self, idx):
+        image_path, label = self.data_list[idx]
+        image = Image.open(image_path).convert('RGB')
+        if self.transform:
+            image = self.transform(image)
+        return image, label
+
+class EarlyStopping:
+    def __init__(self, patience=5, min_delta=0.0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = float('inf')
+        self.early_stop = False
+
+    def __call__(self, val_loss):
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
         else:
-            self.num_bad_epochs += 1
-        print(f"Best Loss: {self.best_loss}, Number of bad epochs: {self.num_bad_epochs}")
-        if self.num_bad_epochs >= self.patience:
-            for param_group in self.optimizer.param_groups:
-                old_lr = param_group['lr']
-                new_lr = max(old_lr * self.factor, self.min_lr)
-                param_group['lr'] = new_lr
-                print(f"Learning rate reduced from {old_lr:.6f} to {new_lr:.6f}")
-            self.num_bad_epochs = 0
+            self.counter += 1
+
+        if self.counter >= self.patience:
+            self.early_stop = True
+
+        print(f"Early Stopping Counter: {self.counter}")
+        return self.early_stop
 
 def train():
     training_data = loadData()
-    model = load_resnet_model()
-    #Rebalence the weights 
-    class_counts = [len(os.listdir(os.path.join(data_path, label))) for label in LABELS.keys()]
-    total_samples = sum(class_counts)
-    class_weights = [total_samples / (len(LABELS) * count) for count in class_counts]
-    class_weights = torch.tensor(class_weights).float()
+    model = load_resnet_model(len(LABELS))
+    model.to(device)
+    
+    # Compute class counts and check if balanced
+    sorted_labels = sorted(LABELS.items(), key=lambda x: x[1])
+    class_names = [l[0] for l in sorted_labels]
+    class_counts = []
+    for label, idx in sorted_labels:
+        class_dir = os.path.join(data_path, label)
+        count = len([f for f in os.listdir(class_dir) if os.path.isfile(os.path.join(class_dir, f))])
+        class_counts.append(count)
+
+    # Set all class weights to 1.0 (balanced classes)
+    if len(set(class_counts)) == 1:  # All counts are equal
+        class_weights = [1.0 for _ in class_counts]
+    else:
+        # Calculate weights as the inverse of class counts
+        total_samples = sum(class_counts)
+        class_weights = [total_samples / (len(class_counts) * count) for count in class_counts]
+        
+    class_weights = torch.tensor(class_weights).float().to(device)
+
+    print("Class weights:", class_weights)
+    print("Class names (in index order):", class_names)
+    print("Class counts (in index order):", class_counts)
+
     loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.0001)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=5)
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.01)
-    scheduler = LossBasedScheduler(optimizer, initial_lr=args.lr, patience=3, factor=0.5)
+    BATCH_SIZE = args.batch_size
+    EPOCHS = args.num_epochs
 
-    BATCH_SIZE = 32
+    # Shuffle and split the data
+    np.random.shuffle(training_data)
+    train_size = int(0.8 * len(training_data))
+    train_data_list = training_data[:train_size]
+    val_data_list = training_data[train_size:]
 
-    try:
-        EPOCHS = int(args.num_epochs)
-    except Exception:
-        print("Please pass a valid number of epochs.")
+    # Simplified augmentations
+    train_transform = transforms.Compose([
+        transforms.RandomResizedCrop(IMG_SIZE, scale=(0.9, 1.0)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406],
+                             [0.229, 0.224, 0.225])
+    ])
 
-    # Prepare the dataset
-    X = torch.tensor(np.array([i[0] for i in training_data])).view(-1, 3, 224, 224).float() / 255.0
-    y = torch.tensor([np.argmax(i[1]) for i in training_data]).long()
-    dataset = TensorDataset(X, y)
+    val_transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(IMG_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406],
+                             [0.229, 0.224, 0.225])
+    ])
 
-    # Split the dataset into training and validation sets
-    train_size = int(0.8 * len(dataset))  # 80% training
-    val_size = len(dataset) - train_size  # 20% validation
-    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+    train_dataset = ApplyTransform(train_data_list, transform=train_transform)
+    val_dataset = ApplyTransform(val_data_list, transform=val_transform)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-    y_true = []
-    y_pred = []
+    train_losses = []
+    val_losses = []
+    early_stopper = EarlyStopping(patience=5, min_delta=0.001)
+
     for epoch in range(EPOCHS):
-        # Training loop
+        # Training
         model.train()
         running_loss = 0.0
+        y_true_train = []
+        y_pred_train = []
         for batch_X, batch_y in tqdm(train_loader, desc=f"Training Epoch {epoch + 1}/{EPOCHS}"):
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
             optimizer.zero_grad()
             outputs = model(batch_X)
             loss = loss_fn(outputs, batch_y)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
-            running_loss += loss.item()
+            running_loss += loss.item() * batch_X.size(0)
 
-        # Validation loop
+            _, predicted = torch.max(outputs, 1)
+            y_true_train.extend(batch_y.cpu().numpy())
+            y_pred_train.extend(predicted.cpu().numpy())
+
+        epoch_loss = running_loss / len(train_loader.dataset)
+        train_losses.append(epoch_loss)
+
+        # Validation
         model.eval()
         val_loss = 0.0
         correct = 0
         total = 0
+        y_true_val = []
+        y_pred_val = []
         with torch.no_grad():
             for batch_X, batch_y in tqdm(val_loader, desc=f"Validation Epoch {epoch + 1}/{EPOCHS}"):
+                batch_X, batch_y = batch_X.to(device), batch_y.to(device)
                 outputs = model(batch_X)
                 loss = loss_fn(outputs, batch_y)
-                val_loss += loss.item()
+                val_loss += loss.item() * batch_X.size(0)
                 _, predicted = torch.max(outputs, 1)
                 correct += (predicted == batch_y).sum().item()
                 total += batch_y.size(0)
-                y_true.extend(batch_y.cpu().numpy())
-                y_pred.extend(predicted.cpu().numpy())
+                y_true_val.extend(batch_y.cpu().numpy())
+                y_pred_val.extend(predicted.cpu().numpy())
 
-        val_loss /= len(val_loader)
+        val_loss = val_loss / len(val_loader.dataset)
+        val_losses.append(val_loss)
         val_accuracy = correct / total
 
         scheduler.step(val_loss)
 
+        # Save model every 3 epochs
         if (epoch + 1) % 3 == 0:
             save_model(model, epoch)
 
-        precision = precision_score(y_true, y_pred, average='macro')
-        recall = recall_score(y_true, y_pred, average='macro')
-        f1 = f1_score(y_true, y_pred, average='macro')
+        target_names = [name for name, idx in sorted(LABELS.items(), key=lambda x: x[1])]
 
-        print(classification_report(y_true, y_pred, target_names=LABELS))
-        print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1:.4f}\n"
-              f"Train Loss: {running_loss / len(train_loader):.4f}, "
-              f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}, "
-              f"Learning Rate: {optimizer.param_groups[0]['lr']:.6f}\n")
+        print(f"Epoch {epoch + 1}/{EPOCHS}")
+        print(f"Train Loss: {epoch_loss:.4f}, Validation Loss: {val_loss:.4f}, "
+              f"Validation Accuracy: {val_accuracy:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}\n")
+
+        print("Classification report on training data:")
+        print(classification_report(y_true_train, y_pred_train, target_names=target_names, zero_division=0))
+
+        if early_stopper(val_loss):
+            print(f'Early stopping triggered at epoch {epoch+1}')
+            break
 
     model.eval()
-    ExportOnnx(model, r"utils\model.onnx")
-    onnx.checker.check_model(r"utils\model.onnx")
+    final_model_path = os.path.join(args.save_mdl, args.mdl_name)
+    ExportOnnx(model, final_model_path)
+    onnx.checker.check_model(final_model_path)
 
 if args.build:
     Builder = buildData(data_path)
@@ -283,19 +354,16 @@ if args.build:
     Builder.trainBuild()
 
 if args.train:
-    model = load_resnet_model()
     train()
 
 if args.img is not None:
-        onnx_model_path = r"utils\model.onnx"
-        test_image_path = args.img
+    onnx_model_path = args.model
+    ort_session = ort.InferenceSession(onnx_model_path)
+    image_tensor = preprocess_image(args.img)
+    output = test_onnx_model(ort_session, image_tensor)
 
-        ort_session = ort.InferenceSession(onnx_model_path)
-        image_tensor = preprocess_image(test_image_path)
-        output = test_onnx_model(ort_session, image_tensor)
-
-        predictions = output[0][0]
-        predicted_index = predictions.argmax()
-        predicted_label = list(LABELS.keys())[list(LABELS.values()).index(predicted_index)]
-        confidence = predictions[predicted_index]
-        print(f"Predicted Animal: {predicted_label}, (Confidence: {confidence:.2f})")
+    predictions = output[0][0]
+    predicted_index = predictions.argmax()
+    predicted_label = list(LABELS.keys())[list(LABELS.values()).index(predicted_index)]
+    confidence = predictions[predicted_index]*2/10
+    print(f"Predicted Animal: {predicted_label}, (Confidence: {confidence:.2f})")
