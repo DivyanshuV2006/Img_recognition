@@ -51,11 +51,9 @@ def select_device(device_choice: str):
         else:
             print("Warning: CUDA requested but not available. Falling back to CPU.")
             return torch.device("cpu")
-    # elif device_choice == "RocM":
-    #     if
     else:
-        # device_choice == "cpu"
         return torch.device("cpu")
 
 
 device = select_device(args.device)
+
