@@ -10,7 +10,7 @@ This repository contains code for building, training, evaluating, and exporting 
 - `ResNet.py`, `EfficientNet_V2_M.py` — model variant definitions (if you want alternatives).
 - `data_processing.py` — dataset builder, transforms, and DataLoader-friendly Dataset class.
 - `utils.py` — helpers: pickle I/O, image preprocessing for inference, ONNX utilities.
-- `LLM.py` — optional/experimental language-model related utilities (not required for core training).
+- `dependencies.py` — optional/experimental language-model related utilities (not required for core training).
 - `requirements.txt` and `environment.yml` — dependency manifests.
 - `Dockerfile` — Docker image to run the project (CPU image by default).
 
