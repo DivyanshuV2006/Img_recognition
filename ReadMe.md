@@ -7,7 +7,7 @@ This repository contains code for building, training, evaluating, and exporting 
 - `train.py` — training loop, dataset split, optimizer/scheduler setup and checkpoint export.
 - `main.py` — CLI to build datasets, run training, or run ONNX-based inference.
 - `model.py` — model assembly and ONNX export helpers (ResNet example with a custom head).
-- `ResNet.py`, `EfficientNet_V2_M.py` — model variant definitions (if you want alternatives).
+- `ResNet.py` — model used to train and test the dataset.
 - `data_processing.py` — dataset builder, transforms, and DataLoader-friendly Dataset class.
 - `utils.py` — helpers: pickle I/O, image preprocessing for inference, ONNX utilities.
 - `dependencies.py` — optional/experimental language-model related utilities (not required for core training).
